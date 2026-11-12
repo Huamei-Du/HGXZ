@@ -23,18 +23,26 @@ from .state import StateDB
 LOG = logging.getLogger('HGXZ')
 
 
+def make_client(site: dict) -> HuangguoClient:
+    """按配置装配站点客户端（含浏览器伪装参数）。"""
+    browser_cfg = site.get('browser') or {}
+    return HuangguoClient(
+        site['base_url'],
+        float(site.get('request_interval', 2)),
+        int(site.get('timeout', 30)),
+        backup_urls=site.get('backup_urls', []),
+        browser_profile=str(browser_cfg.get('profile', 'chrome')),
+        browser_proxy=(str(browser_cfg['proxy']) if browser_cfg.get('proxy') else None),
+    )
+
+
 class Archiver:
     MAX_CATEGORY_PAGES = 100
 
     def __init__(self, config: dict):
         self.config = config
         site = config['site']
-        self.client = HuangguoClient(
-            site['base_url'],
-            float(site.get('request_interval', 2)),
-            int(site.get('timeout', 30)),
-            backup_urls=site.get('backup_urls', []),
-        )
+        self.client = make_client(site)
         self.root = Path(config['download']['root'])
         self.state = StateDB(Path(config['state']['database']))
         self.retries = int(config['download'].get('retries', 3))
@@ -44,6 +52,7 @@ class Archiver:
         self.episode_timeout = float(config['download'].get('episode_timeout', 1800))
 
     def close(self):
+        self.client.close()
         self.state.close()
 
     def discover(self) -> list[tuple[int, dict]]:
@@ -120,7 +129,8 @@ class Archiver:
                     url = self.client.cover_url(album.id)
                 if not url:
                     continue
-                write_cover(self.client.get_bytes(url), poster)
+                write_cover(self.client.get_bytes(url, referer=self.client.page_referer(album.id)),
+                            poster)
                 return
             except Exception as exc:
                 LOG.warning('album=%s cover via %s failed: %s',
@@ -232,8 +242,9 @@ class Archiver:
             for attempt in range(1, self.retries + 1):
                 try:
                     url = self.client.play_url(album.id, number)
-                    info = download_hls(url, video, self.client.base_url + '/',
-                                        self.minimum_duration, timeout=self.episode_timeout)
+                    info = download_hls(url, video, self.client.page_referer(album.id),
+                                        self.minimum_duration, timeout=self.episode_timeout,
+                                        session=self.client.session)
                     self.state.mark_episode(album.id, number, str(video), 'done',
                                             info.get('size', 0))
                     done += 1
@@ -428,14 +439,9 @@ def main() -> int:
 
     if args.rebuild_covers:
         from .rebuild_covers import rebuild
-        site = config['site']
-        client = HuangguoClient(
-            site['base_url'],
-            float(site.get('request_interval', 2)),
-            int(site.get('timeout', 30)),
-            backup_urls=site.get('backup_urls', []),
-        )
+        client = make_client(config['site'])
         result = rebuild(Path(config['download']['root']), client)
+        client.close()
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result['failed'] == 0 else 1
 

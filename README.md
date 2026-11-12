@@ -10,11 +10,47 @@
 
 - **自动发现与下载** — 遍历分类页面，自动发现新专辑并下载全部剧集
 - **HLS 逐段下载** — 独立短连接分段下载+自动重试，避免 CDN 长连接断流；支持 AES-128 流解密
+- **浏览器级指纹伪装** — 请求走真实 Chrome 的 TLS 指纹 + HTTP/2 + 完整浏览器请求头 + 全站 Cookie 会话，不再被 CDN 按“非浏览器流量”拦截（详见下方「请求伪装说明」）
 - **增量同步** — 已下载完成的自动跳过，失败集进入冷却期后定时重试
 - **Emby 兼容** — 自动创建 `tvshow.nfo`、`episodedetails.nfo` 和 `poster.jpg`，智能跳过无变化重写
 - **多域名故障切换** — 主站异常时自动无缝切换备用域名，恢复后自动切回
 - **WebUI 管理** — 仪表盘统计、分类进度、专辑列表（含封面）、剧集明细、实时日志（WebSocket 流式推送）、运行参数查看
 - **Unraid 专属支持** — 提供现成的 Unraid Docker 图形化安装模板
+
+---
+
+## 请求伪装说明（本修改版新增）
+
+原版抓分片时用的是 `urllib` + 两个头（`User-Agent: Mozilla/5.0`、`Referer`），在 CDN/WAF 看来处处是破绽，常见表现是分片请求 403、下到一半断流、播放地址返回空。
+
+现在全部 HTTP 请求（分类页、详情页、接口、m3u8、TS 分片、封面）统一走 `HGXZ/browser.py` 的浏览器会话：
+
+| 层次 | 原版 | 现在 |
+|------|------|------|
+| TLS 指纹（JA3/JA4） | Python OpenSSL 默认指纹 | 真实 Chrome 指纹（curl_cffi impersonate） |
+| HTTP 协议 | HTTP/1.1 | HTTP/2 |
+| User-Agent | `Mozilla/5.0`（爬虫经典签名） | 完整 Chrome UA，与 `sec-ch-ua` 版本严格一致 |
+| 请求头 | 仅 UA + Referer | `Accept` / `Accept-Language` / `sec-ch-ua*` / `sec-fetch-*` / `Accept-Encoding` 全套，按 Chrome 实际顺序发送 |
+| 分片请求的 `Referer` | 站点根路径 | 播放页地址（和 hls.js 行为一致） |
+| Cookie | 每个请求独立、无状态 | 全站共享 Cookie 罐，站点与 CDN 连续会话 |
+| 被拦处理 | 直接失败 | 丢弃会话 → 重开首页/播放页取 Cookie → 重试 |
+
+有个反直觉的点：**分片请求不能带 `Sec-Fetch-User: ?1` / `Upgrade-Insecure-Requests` 这类只有导航请求才有的头**——多带比少带更容易被识别，所以底层默认头被关掉、改由程序完整组装。
+
+`curl_cffi` 缺失时会自动降级为“请求头完备 + 带 Cookie 罐”的 urllib 模式（能过只看请求头的风控，过不了 TLS 指纹检测），日志里有明确提示。
+
+验证指纹（本地执行即可）：
+
+```bash
+python -c "
+from HGXZ.browser import BrowserSession
+import json
+s = BrowserSession()
+d = json.loads(s.fetch('https://tls.peet.ws/api/all', referer='https://tls.peet.ws/', kind='document'))
+print(d['http_version'], d['tls']['ja4'])"
+```
+
+输出形如 `h2 t13d1516h2_8daaf6152771_d8a2da3f94cd`，即 Chrome 的 JA4 指纹。
 
 ---
 
@@ -203,6 +239,7 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
     ],
     "request_interval": 2,
     "timeout": 30,
+    "browser": { "profile": "chrome" },
     "categories": [
       { "name": "AI成人短剧", "path": "/ai-duanju/", "library": "AI成人短剧" },
       { "name": "AI成人漫剧", "path": "/ai-manju/", "library": "AI成人漫剧" }
@@ -227,6 +264,8 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 | `site.backup_urls` | 备用域名列表，主站故障时自动切换（建议保留全部 9 个） | 见模板 |
 | `site.request_interval` | 请求间隔延迟（秒），防止被站点风控 | `2` |
 | `site.timeout` | 单次请求超时（秒） | `30` |
+| `site.browser.profile` | 伪装用的浏览器指纹：`chrome` / `chrome142` / `chrome136` / `chrome131`（与站点过不去时可换一个试试） | `chrome` |
+| `site.browser.proxy` | 可选，单独给抓取会话指定代理（如 `http://192.168.1.2:7890`）；留空则沿用 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量 | 空 |
 | `site.categories` | 抓取的短剧分类与对应生成的 Emby 媒体库目录名 | — |
 | `download.root` | 视频下载根目录（对应容器内 `/media`） | `/media` |
 | `download.retries` | 单集重试次数 | `3` |
@@ -271,7 +310,9 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 |------|-----------|
 | 容器启动后立即退出并报 JSON 解析错误 | `config.json` 内容不合法或为空文件。检查文件是否为合法 JSON |
 | 日志出现 `SSL: WRONG_VERSION_NUMBER` 或 `HTTP 404` | DNS 污染。确认 `HTTP_PROXY`/`HTTPS_PROXY` 已设置为局域网代理，且 `NO_PROXY` **不要**包含 `huangguoai.com` |
-| 日志出现 `HTTP 403 Forbidden` | 缺少浏览器 UA 或站点风控。程序已内置浏览器 UA，若持续出现请降低 `request_interval` 之外的并发（程序本身为单线程顺序请求） |
+| 日志出现 `HTTP 403 Forbidden` | 站点风控。程序现在会伪装真实 Chrome 指纹并在被拦后重建会话重试；若仍持续，可尝试换 `site.browser.profile`（如 `chrome136`）、调大 `site.request_interval`，或经代理出网 |
+| 日志出现 `BlockedError` / `请求被拦` | 同上，说明 CDN 识别到了异常流量。连续出现时先确认出网 IP 是否被站点拉黑 |
+| 日志出现 `未安装 curl_cffi，退化为 urllib 传输层` | 容器/环境里缺 `curl_cffi`，只能挡请求头级检测。重装依赖：`pip install "curl_cffi>=0.7"` |
 | 某集一直失败 | 剧集可能已下架，失败会进入 24 小时冷却。可在 WebUI 点「重置失败」立即重试 |
 | 界面看不到封面 | 站点封面接口异常时会自动回退到 og:image；若两者都失败，日志中会有 `cover via ... failed` 记录 |
 

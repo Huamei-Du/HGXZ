@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin
 import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
+
+from .browser import BrowserSession
 
 
 LOG = logging.getLogger(__name__)
 
-_HEADERS_UA = 'Mozilla/5.0'
 _SEGMENT_ATTEMPTS = 3
+_DEFAULT_SESSION: BrowserSession | None = None
+_DEFAULT_LOCK = threading.Lock()
+
+
+def _default_session() -> BrowserSession:
+    """独立调用（例如只跑下载流程）时兜底的浏览器会话。"""
+    global _DEFAULT_SESSION
+    with _DEFAULT_LOCK:
+        if _DEFAULT_SESSION is None:
+            _DEFAULT_SESSION = BrowserSession(profile='chrome')
+        return _DEFAULT_SESSION
 
 
 def probe_media(path: Path) -> dict:
@@ -39,10 +51,14 @@ def validate_media(info: dict, minimum_duration: float = 3.0) -> bool:
     return bool(info.get('duration', 0) >= minimum_duration and info.get('video', 0) >= 1)
 
 
-def _fetch(url: str, referer: str, timeout: float) -> bytes:
-    req = Request(url, headers={'User-Agent': _HEADERS_UA, 'Referer': referer})
-    with urlopen(req, timeout=timeout) as response:
-        return response.read()
+def _fetch(url: str, referer: str, timeout: float,
+           session: BrowserSession | None = None,
+           kind: str = 'video') -> bytes:
+    # 所有请求都走浏览器伪装会话：真实 Chrome 的 TLS 指纹、HTTP/2、
+    # 完整 sec-fetch-* 请求头，并复用站点的 Cookie。原实现只发了
+    # "User-Agent: Mozilla/5.0"，这在 CDN 侧是最明显的爬虫特征。
+    return (session or _default_session()).fetch(
+        url, referer=referer, kind=kind, timeout=timeout, pace=True)
 
 
 def _attrs(line: str) -> dict:
@@ -89,11 +105,12 @@ def _parse_m3u8(text: str, playlist_url: str) -> dict:
     return {'segments': segments}
 
 
-def _resolve_media_playlist(url: str, referer: str, timeout: float) -> tuple[str, str]:
+def _resolve_media_playlist(url: str, referer: str, timeout: float,
+                            session: BrowserSession | None = None) -> tuple[str, str]:
     """Follow master playlists (multiple variants) down to a media playlist."""
     playlist_url = url
     for _ in range(3):
-        text = _fetch(playlist_url, referer, timeout).decode('utf-8', errors='replace')
+        text = _fetch(playlist_url, referer, timeout, session, 'playlist').decode('utf-8', errors='replace')
         if '#EXT-X-STREAM-INF' not in text:
             return playlist_url, text
         lines = text.splitlines()
@@ -132,7 +149,9 @@ def _decrypt_segment(data: bytes, key: bytes, iv: bytes) -> bytes:
     return plain
 
 
-def download_hls(url: str, destination: Path, referer: str, minimum_duration: float = 3.0, timeout: float | None = 1800.0) -> dict:
+def download_hls(url: str, destination: Path, referer: str, minimum_duration: float = 3.0,
+                 timeout: float | None = 1800.0,
+                 session: BrowserSession | None = None) -> dict:
     # Fetch every HLS segment as its own short-lived request with retries
     # instead of one long ffmpeg stream: the CDN resets long connections
     # mid-transfer, but a few megabytes per request survive that fine.
@@ -142,13 +161,15 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
     deadline = None if timeout is None else time.monotonic() + timeout
     fetch_timeout = 30.0
     try:
-        playlist_url, playlist_text = _resolve_media_playlist(url, referer, fetch_timeout)
+        playlist_url, playlist_text = _resolve_media_playlist(
+            url, referer, fetch_timeout, session)
         parsed = _parse_m3u8(playlist_text, playlist_url)
         segments = parsed['segments']
         if not segments:
             raise RuntimeError('playlist has no segments')
         LOG.info('HLS playlist parsed: %d segments', len(segments))
-        playlist_referer = f'{urlsplit(playlist_url).scheme}://{urlsplit(playlist_url).netloc}/'
+        # 真实浏览器里 hls.js 的分片请求 Referer 是播放页地址，不是源站根路径。
+        segment_referer = referer
         keys: dict[str, bytes] = {}
         workdir = Path(tempfile.mkdtemp(prefix='hls-'))
         try:
@@ -159,7 +180,8 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
                         raise TimeoutError(f'HLS download exceeded {timeout}s')
                     key_uri = segment['key_uri']
                     if key_uri and key_uri not in keys:
-                        keys[key_uri] = _fetch(key_uri, playlist_referer, fetch_timeout)
+                        keys[key_uri] = _fetch(key_uri, segment_referer, fetch_timeout,
+                                               session, 'api')
                     data = None
                     last_error: Exception | None = None
                     for attempt in range(1, _SEGMENT_ATTEMPTS + 1):
@@ -167,8 +189,9 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
                         if remaining is not None and remaining <= 0:
                             raise TimeoutError(f'HLS download exceeded {timeout}s')
                         try:
-                            data = _fetch(segment['url'], playlist_referer,
-                                          fetch_timeout if remaining is None else min(fetch_timeout, remaining))
+                            data = _fetch(segment['url'], segment_referer,
+                                          fetch_timeout if remaining is None else min(fetch_timeout, remaining),
+                                          session)
                             if key_uri:
                                 data = _decrypt_segment(data, keys[key_uri], segment['iv'])
                             break

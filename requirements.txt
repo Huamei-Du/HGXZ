@@ -1,2 +1,4 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
+# 真实 Chrome TLS/HTTP2 指纹，用于绕过 CDN 的爬虫识别（见 HGXZ/browser.py）
+curl_cffi>=0.7

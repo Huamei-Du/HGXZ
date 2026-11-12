@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 import json
 import logging
 import random
 import time
+
+from .browser import BrowserSession
 
 
 LOG = logging.getLogger(__name__)
@@ -19,6 +20,9 @@ class HuangguoClient:
         request_interval: float = 2.0,
         timeout: int = 30,
         backup_urls: list[str] | None = None,
+        browser: BrowserSession | None = None,
+        browser_profile: str = 'chrome',
+        browser_proxy: str | None = None,
     ):
         urls = [base_url, *(backup_urls or [])]
         self.base_urls = list(dict.fromkeys(url.rstrip('/') for url in urls if url))
@@ -28,8 +32,22 @@ class HuangguoClient:
         self.request_interval = request_interval
         self.timeout = timeout
         self.last_request = 0.0
-        self.user_agent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36'
+        # 整站共用一个浏览器会话：Cookie 在站点接口和 CDN 分片之间延续，
+        # 这才是真实浏览器“先看页面再播视频”的链路。
+        self.session = browser or BrowserSession(
+            profile=browser_profile,
+            timeout=timeout,
+            request_interval=min(request_interval, 0.4),
+            proxy=browser_proxy,
+        )
         self._backup_requests = 0
+
+    @property
+    def user_agent(self) -> str:
+        return self.session.profile.user_agent
+
+    def close(self) -> None:
+        self.session.close()
 
     def _throttle(self) -> None:
         wait = self.request_interval - (time.monotonic() - self.last_request)
@@ -49,7 +67,9 @@ class HuangguoClient:
                 candidates = [self.base_urls[0], self.base_url, *[url for url in self.base_urls if url not in (self.base_urls[0], self.base_url)]]
         return candidates
 
-    def _request(self, method: str, path: str, *, data: bytes | None = None, headers: dict | None = None) -> bytes:
+    def _request(self, method: str, path: str, *, data: bytes | None = None,
+                 headers: dict | None = None, referer: str | None = None,
+                 kind: str = 'api') -> bytes:
         self._throttle()
         is_absolute = path.startswith('http')
         candidates = self._candidates(is_absolute)
@@ -57,19 +77,24 @@ class HuangguoClient:
         try:
             for index, candidate in enumerate(candidates):
                 url = path if is_absolute else candidate + path
-                referer = self.base_url + '/' if is_absolute else candidate + '/'
-                request_headers = {'User-Agent': self.user_agent, 'Referer': referer}
-                request_headers.update(headers or {})
-                req = Request(url, method=method, data=data, headers=request_headers)
+                if referer:
+                    ref = referer
+                elif is_absolute:
+                    ref = self.base_url + '/'
+                else:
+                    ref = candidate + '/'
+                # 新域名先像人一样打开一次首页，把 Cookie（cf_clearance 等）拿全。
+                self.session.warm_up(ref if is_absolute else candidate)
                 try:
-                    with urlopen(req, timeout=self.timeout) as response:
-                        body = response.read()
+                    body = self.session.fetch(
+                        url, referer=ref, kind=kind, headers=headers,
+                        data=data, method=method, timeout=self.timeout)
                     if candidate and candidate != self.base_url:
                         LOG.warning('site base URL switched to: %s', candidate)
                         self.base_url = candidate
                         self._backup_requests = 0
                     return body
-                except (HTTPError, URLError, TimeoutError, ConnectionError, OSError) as error:
+                except (HTTPError, URLError, TimeoutError, ConnectionError, OSError, RuntimeError) as error:
                     last_error = error
                     if is_absolute or index == len(candidates) - 1:
                         raise
@@ -79,13 +104,20 @@ class HuangguoClient:
             self.last_request = time.monotonic()
 
     def get_text(self, path: str) -> str:
-        return self._request('GET', path).decode('utf-8', errors='replace')
+        return self._request('GET', path, kind='document').decode('utf-8', errors='replace')
 
-    def get_bytes(self, url: str) -> bytes:
-        return self._request('GET', url)
+    def get_bytes(self, url: str, referer: str | None = None,
+                  kind: str = 'image') -> bytes:
+        return self._request('GET', url, referer=referer, kind=kind)
+
+    def page_referer(self, album_id: int) -> str:
+        """播放页地址：分片请求的 Referer 用它才符合真实播放行为。"""
+        return f'{self.base_url}/video/{int(album_id)}/'
 
     def play_url(self, album_id: int, episode: int) -> str:
-        raw = self._request('GET', f'/api/videos/{int(album_id)}/play?' + urlencode({'ep': int(episode)}))
+        raw = self._request(
+            'GET', f'/api/videos/{int(album_id)}/play?' + urlencode({'ep': int(episode)}),
+            referer=self.page_referer(album_id), kind='api')
         payload = json.loads(raw)
         if payload.get('status') != 1:
             raise RuntimeError(payload.get('msg') or 'play endpoint failed')
@@ -96,7 +128,9 @@ class HuangguoClient:
 
     def cover_url(self, album_id: int) -> str:
         body = json.dumps({'items': [{'type': 'video', 'id': int(album_id)}]}, ensure_ascii=False).encode()
-        raw = self._request('POST', '/api/media/covers', data=body, headers={'Content-Type': 'application/json'})
+        raw = self._request('POST', '/api/media/covers', data=body,
+                            headers={'Content-Type': 'application/json'},
+                            referer=self.page_referer(album_id), kind='api')
         payload = json.loads(raw)
         if payload.get('status') != 1:
             raise RuntimeError(payload.get('msg') or 'cover endpoint failed')
