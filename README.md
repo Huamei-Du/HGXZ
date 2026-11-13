@@ -67,12 +67,12 @@ print(d['http_version'], d['tls']['ja4'])"
 
 ## 一、Docker 镜像信息
 
-- **镜像地址**：`ghcr.io/wx2cyj/hgxz:latest`
+- **镜像地址**：`ghcr.io/huamei-du/hgxz:latest`
 - **平台架构**：`linux/amd64`
 - **镜像可见性**：**公开（public）**，无需登录即可直接拉取：
 
   ```bash
-  docker pull ghcr.io/wx2cyj/hgxz:latest
+  docker pull ghcr.io/huamei-du/hgxz:latest
   ```
 
 ---
@@ -90,7 +90,7 @@ mkdir -p /mnt/user/appdata/HGXZ/config /mnt/user/appdata/HGXZ/data /mnt/user/app
 将项目中的 `config.example.json` 复制到 `/mnt/user/appdata/HGXZ/config/config.json`：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/wx2cyj/HGXZ/main/config.example.json -o /mnt/user/appdata/HGXZ/config/config.json
+curl -sSL https://raw.githubusercontent.com/Huamei-Du/HGXZ/main/config.example.json -o /mnt/user/appdata/HGXZ/config/config.json
 ```
 
 > 也可以通过 SMB 共享或 Unraid 文件管理器直接在 `/mnt/user/appdata/HGXZ/config/` 下创建并编辑 `config.json`。
@@ -101,7 +101,7 @@ curl -sSL https://raw.githubusercontent.com/wx2cyj/HGXZ/main/config.example.json
 
 1. 在 Unraid 终端中，将本项目的模板文件下载到 Unraid 用户模板目录：
    ```bash
-   curl -sSL https://raw.githubusercontent.com/wx2cyj/HGXZ/main/unraid/hgxz.xml -o /boot/config/plugins/dockerMan/templates-user/my-hgxz.xml
+   curl -sSL https://raw.githubusercontent.com/Huamei-Du/HGXZ/main/unraid/hgxz.xml -o /boot/config/plugins/dockerMan/templates-user/my-hgxz.xml
    ```
 2. 进入 Unraid 网页端 **【Docker】** → 点击底部的 **【添加容器】（Add Container）**。
 3. 在 **【模板】（Template）** 下拉菜单中选择 **`HGXZ`**（系统会自动填充所有配置项）。
@@ -110,7 +110,7 @@ curl -sSL https://raw.githubusercontent.com/wx2cyj/HGXZ/main/config.example.json
 | 设置项 | 字段名 | 填写内容 | 说明 |
 |--------|--------|----------|------|
 | **名称** | Name | `HGXZ` | 容器名称 |
-| **存储库** | Repository | `ghcr.io/wx2cyj/hgxz:latest` | 镜像地址（公开，无需登录） |
+| **存储库** | Repository | `ghcr.io/huamei-du/hgxz:latest` | 镜像地址（公开，无需登录） |
 | **WebUI 端口** | Port: 8099 | `8099` | Web 界面访问端口，可按需修改 |
 | **配置文件目录** | Path: /config | `/mnt/user/appdata/HGXZ/config` | 存放 config.json |
 | **状态库目录** | Path: /data | `/mnt/user/appdata/HGXZ/data` | SQLite 数据库文件 |
@@ -159,7 +159,7 @@ docker run -d --name HGXZ \
   -e HTTP_PROXY=http://192.168.2.6:10086 \
   -e HTTPS_PROXY=http://192.168.2.6:10086 \
   -e NO_PROXY=127.0.0.1,localhost \
-  ghcr.io/wx2cyj/hgxz:latest
+  ghcr.io/huamei-du/hgxz:latest
 ```
 
 ---
