@@ -164,6 +164,72 @@ docker run -d --name HGXZ \
 
 ---
 
+## 三之二、Docker Compose 部署（fnOS / 群晖 / 通用）
+
+飞牛 fnOS、群晖等没有 Unraid 模板的机器，用 Compose 最省事——以后换镜像只要
+`docker compose pull && docker compose up -d`，不会踩 `latest` 缓存。
+
+```yaml
+services:
+  hgxz:
+    image: ghcr.io/huamei-du/hgxz:latest
+    container_name: HGXZ
+    restart: unless-stopped
+    init: true                # 让 tini 回收 ffmpeg 子进程，避免僵尸进程堆积
+    ports:
+      - "8099:8099"
+    volumes:
+      - /vol1/1000/docker/HGXZ/config:/config    # 必须是宿主机真实目录，里面放 config.json
+      - /vol1/1000/docker/HGXZ/data:/data
+      - /vol1/1000/docker/HGXZ/logs:/logs
+      - /vol2/1000/黄果视频:/media
+    environment:
+      - TZ=Asia/Shanghai
+      - SCHEDULE=03:30        # 每天同步时间
+      - UMASK=000
+      - HTTP_PROXY=http://192.168.31.128:7890
+      - HTTPS_PROXY=http://192.168.31.128:7890
+      - NO_PROXY=localhost,127.0.0.1
+    command: ["--daemon"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"       # 不限制的话 docker logs 会一路吃满系统盘
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket;socket.create_connection(('127.0.0.1',8099),3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+```
+
+几个容易踩的点：
+
+- **`command` 必须写成列表**。写成 `command: --daemon   # 注释` 时 YAML 会把
+  `--daemon` 和 `#` 后面的内容一起当字符串，多切出一个参数，容器启动即退出。
+  YAML 注释必须单独占一行且以 `#` 开头。
+- **`/config` 里要真的有 `config.json`**。只挂空目录会启动失败，程序现在会直接
+  提示「配置文件不存在」并附上处理方法，不再甩一段 traceback。
+- **`NO_PROXY` 别省**。不设的话连 `127.0.0.1` 都会走代理，本地回环请求绕一圈回来
+  反而容易出错。
+- 环境变量里的 `HTTP_PROXY` / `HTTPS_PROXY` 会由 curl_cffi 自动采用，启动日志会
+  打印最终生效的线路（见下），配了没生效一眼就能看出来。
+
+启动后前几行日志长这样，可以用来自查：
+
+```
+INFO HGXZ 1.1.0 (build 022ef45 @ 2026-11-13T02:12:19Z)      ← 版本 + 构建 commit
+INFO HTTP 传输层: curl_cffi/chrome142（Chrome TLS 指纹 + HTTP/2）
+INFO 出站代理: http://192.168.31.128:7890（来自环境变量，直连 localhost,127.0.0.1）
+INFO WebUI starting on port 8099
+```
+
+`build` 后面的短 SHA 和仓库 `git log` 对得上，就能确定容器跑的是哪一次构建。
+若无 `HTTP 传输层` 一行，说明 `curl_cffi` 没装进镜像，伪装不会生效。
+
+---
+
 ## 四、WebUI 界面说明
 
 | 页面 | 内容 |
@@ -309,6 +375,11 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 
 | 现象 | 原因与处理 |
 |------|-----------|
+| 容器**退出码 137** | 137 = 128 + 9，进程被 SIGKILL。多数是「停止容器时 10 秒内没退出被强杀」，也可能是内存不足。先看日志最后一行：出现 `收到 SIGTERM，退出` 属正常停止；没有任何信号日志且发生在下载中，就要查内存（`docker stats HGXZ`）或降低同时下载的规模 |
+| 容器**退出码 2** | 命令行参数错了。多半是 `command` 那行写了 `command: --daemon   # 说明` 这种行尾注释，被当成多余参数。改成 `command: ["--daemon"]` |
+| 日志提示「配置文件不存在」 | `/config` 挂载的宿主机目录里还没有 `config.json`。把 `config.example.json` 复制过去改名即可 |
+| 启动日志没有 `HTTP 传输层` 一行 | `curl_cffi` 没装进镜像，TLS 指纹仍是 Python 的。需要重新 `docker pull`（依赖层变了，只重启容器不生效） |
+| 启动日志的 `出站代理` 和自己想的不一样 | 该行会说明代理来自 `config.json` 还是环境变量。若显示「直连」而你以为配了，检查变量名是否为 `HTTP_PROXY`/`HTTPS_PROXY`，以及是否写在了 compose 的 `environment` 里 |
 | 容器启动后立即退出并报 JSON 解析错误 | `config.json` 内容不合法或为空文件。检查文件是否为合法 JSON |
 | 日志出现 `SSL: WRONG_VERSION_NUMBER` 或 `HTTP 404` | DNS 污染。确认 `HTTP_PROXY`/`HTTPS_PROXY` 已设置为局域网代理，且 `NO_PROXY` **不要**包含 `huangguoai.com` |
 | 日志出现 `HTTP 403 Forbidden` | 站点风控。程序现在会伪装真实 Chrome 指纹并在被拦后重建会话重试；若仍持续，可尝试换 `site.browser.profile`（如 `chrome136`）、调大 `site.request_interval`，或经代理出网 |

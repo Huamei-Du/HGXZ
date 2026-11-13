@@ -8,6 +8,7 @@ import json
 import logging
 import logging.handlers
 import os
+import signal
 import threading
 import time
 import re
@@ -334,8 +335,39 @@ class Archiver:
         return results, failures
 
 
+class ConfigError(RuntimeError):
+    """配置文件缺失或写错，用一句人话代替 traceback。"""
+
+
+_REQUIRED_PATHS = (
+    ('site', 'base_url'),
+    ('download', 'root'),
+    ('state', 'database'),
+)
+
+
 def load_config(path: Path) -> dict:
-    return json.loads(path.read_text(encoding='utf-8'))
+    if not path.is_file():
+        raise ConfigError(
+            f'配置文件不存在: {path}\n'
+            '  Docker 部署要多做一步：把仓库里的 config.example.json 复制到宿主机上\n'
+            '  挂载到 /config 的那个目录，并改名为 config.json，然后重启容器。\n'
+            '  也请顺手确认 compose 的 volumes 里确实有 "<宿主目录>:/config"。')
+    try:
+        config = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f'配置文件 JSON 语法错误: {path} 第 {exc.lineno} 行第 {exc.colno} 列 — {exc.msg}\n'
+            '  JSON 不允许多余的逗号、注释和单引号，改完再重启。') from None
+    if not isinstance(config, dict):
+        raise ConfigError(f'配置文件顶层必须是一个 JSON 对象: {path}')
+    for section, key in _REQUIRED_PATHS:
+        block = config.get(section)
+        if not isinstance(block, dict) or not block.get(key):
+            raise ConfigError(
+                f'配置文件缺少必填项 {section}.{key}: {path}\n'
+                '  直接对照 config.example.json 补齐即可。')
+    return config
 
 
 def run_daemon(config: dict, schedule: str, web_port: int = 8099) -> int:
@@ -365,6 +397,11 @@ def run_daemon(config: dict, schedule: str, web_port: int = 8099) -> int:
     LOG.info('HGXZ %s', build_label())
 
     archiver = Archiver(config)
+    # 让「指纹版本 / 出站代理」紧跟版本横幅出现在启动日志里，别等第一次同步
+    try:
+        archiver.client.session.warmup()
+    except Exception as exc:  # 传输层起不来也要把原因说清楚，而不是静默
+        LOG.warning('HTTP 传输层初始化失败: %s', exc)
     archiver_ref = [archiver]
     set_shared_state(archiver.state, log_buf, archiver_ref)
 
@@ -406,6 +443,30 @@ def run_daemon(config: dict, schedule: str, web_port: int = 8099) -> int:
     sync_thread = threading.Thread(target=sync_loop, daemon=True, name='sync-daemon')
     sync_thread.start()
 
+    def _handle_stop(signum, _frame):
+        # docker stop / 面板上的“停止”先发 SIGTERM，10 秒内没退出就升级成 SIGKILL，
+        # 容器层面显示为 137（128+9）。同步线程可能正卡在 libcurl 的 C 调用或
+        # ffmpeg 子进程上，等它自然收尾往往超过 10 秒，所以这里记一行日志就退出：
+        # 停止动作干脆，日志里也能看出是“被人叫停”而不是“崩了”。
+        # 未下完的分片只是 .part，下次同步会重下这一段，不会污染成片。
+        name = signal.Signals(signum).name
+        LOG.info('收到 %s，退出（未完成的下载会在下次同步时续上）', name)
+        logging.shutdown()
+        os._exit(0)
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _handle_stop)
+        except (ValueError, OSError):
+            # 非主线程或环境不支持时忽略，不影响正常跑
+            pass
+    if hasattr(signal, 'SIGBREAK'):
+        # Windows 上 Ctrl+Break / 停止进程走这条，本地调试时也能干净退出
+        try:
+            signal.signal(signal.SIGBREAK, _handle_stop)
+        except (ValueError, OSError):
+            pass
+
     LOG.info('WebUI starting on port %s', web_port)
     app = create_app()
     uvicorn.run(app, host='0.0.0.0', port=web_port, log_level='warning')
@@ -443,7 +504,11 @@ def main() -> int:
             os.umask(int(umask_val, 8))
         except Exception as exc:
             logging.getLogger('HGXZ').warning('failed to set umask=%s: %s', umask_val, exc)
-    config = load_config(Path(args.config))
+    try:
+        config = load_config(Path(args.config))
+    except ConfigError as exc:
+        LOG.error('%s', exc)
+        return 2
 
     if args.daemon:
         return run_daemon(config, args.schedule, args.port)

@@ -29,6 +29,7 @@ from urllib.request import (HTTPCookieProcessor, Request, build_opener,
                             urlopen)
 import gzip
 import logging
+import os
 import random
 import threading
 import time
@@ -124,6 +125,43 @@ def _canonical(name: str) -> str:
     return '-'.join(part[:1].upper() + part[1:].lower() for part in name.split('-'))
 
 
+_PROXY_ENV_KEYS = ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
+                   'ALL_PROXY', 'all_proxy')
+
+
+def _mask_proxy(url: str) -> str:
+    """代理地址里的账号密码打码后再进日志。"""
+    parts = urlsplit(url)
+    if not (parts.username or parts.password):
+        return url
+    host = parts.hostname or ''
+    if parts.port:
+        host = f'{host}:{parts.port}'
+    return f'{parts.scheme}://***@{host}'
+
+
+def _env_proxy() -> str | None:
+    """读环境变量里的出站代理。
+
+    这里只用于“报告”，实际采用由 curl_cffi 的 trust_env 完成（它默认 True，
+    libcurl 会自己读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY）。两条路径必须对得上，
+    否则日志里说有代理、实际却直连，排查时会走偏。
+    """
+    for key in _PROXY_ENV_KEYS:
+        value = (os.environ.get(key) or '').strip()
+        if value:
+            return value
+    return None
+
+
+def _env_no_proxy() -> str:
+    for key in ('NO_PROXY', 'no_proxy'):
+        value = (os.environ.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
 def _fetch_site(referer: str | None, url: str) -> str:
     """sec-fetch-site: 同源 / 同站 / 跨站，浏览器就是这么算的。"""
     if not referer:
@@ -200,6 +238,32 @@ class BrowserSession:
                         '未安装 curl_cffi，退化为 urllib 传输层：请求头已补全、'
                         'Cookie 会保持，但 TLS 指纹仍是 Python 的，遇到强风控的 '
                         'CDN 仍可能被拦。建议 pip install "curl_cffi>=0.7"')
+            self._log_route()
+
+    def _log_route(self) -> None:
+        """启动时把出站线路摊开写一行：配了代理却没生效，是最常见的“说不通”。"""
+        if self.proxy:
+            LOG.info('出站代理: %s（来自 config.json 的 site.browser.proxy）',
+                     _mask_proxy(self.proxy))
+            env_proxy = _env_proxy()
+            if env_proxy and _mask_proxy(env_proxy) != _mask_proxy(self.proxy):
+                LOG.info('  环境变量里的代理 %s 已被配置覆盖', _mask_proxy(env_proxy))
+            return
+        env_proxy = _env_proxy()
+        if env_proxy:
+            bypass = _env_no_proxy()
+            LOG.info('出站代理: %s（来自环境变量%s）', _mask_proxy(env_proxy),
+                     f'，直连 {bypass}' if bypass else '')
+            return
+        LOG.info('出站代理: 直连（config.json 与环境变量都没有设置）')
+
+    def warmup(self) -> None:
+        """启动阶段就把传输层建起来。
+
+        好处是「指纹版本 / 出站代理」这类线路信息紧跟着版本横幅出现，不用等
+        第一次同步；万一代理填错，也能在启动日志里第一时间看到走的是哪条路。
+        """
+        self._ensure()
 
     def reset(self) -> None:
         """丢掉整个会话（Cookie + 连接池），用于被拦后重新做人。"""
