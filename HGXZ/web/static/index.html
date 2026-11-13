@@ -316,6 +316,24 @@ header .container{display:flex;align-items:center;justify-content:space-between;
 const API = '';
 let ws = null, currentAlbumId = null, debounceTimer = null;
 let allLogs = [], albumCache = [];
+// 页面加载时先取一次历史日志，WebSocket 连上后服务端又会把最近 200 条重推一遍，
+// 不去重的话每行都会显示两次。按 时间戳+级别+内容 记指纹，重复的直接丢弃。
+const logKeys = new Set();
+function logEntryKey(e){
+  return (e.timestamp || 0) + '|' + (e.level || '') + '|' + (e.message || '');
+}
+function pushLog(entry){
+  const key = logEntryKey(entry);
+  if (logKeys.has(key)) return false;
+  logKeys.add(key);
+  allLogs.push(entry);
+  if (allLogs.length > 2000) allLogs.splice(0, allLogs.length - 2000);
+  if (logKeys.size > 4000) {           // 跟着裁剪，别让指纹集合无限长
+    logKeys.clear();
+    allLogs.forEach(e => logKeys.add(logEntryKey(e)));
+  }
+  return true;
+}
 
 /* ---------------- helpers ---------------- */
 function esc(v){ const d = document.createElement('div'); d.textContent = v == null ? '' : String(v); return d.innerHTML; }
@@ -690,8 +708,7 @@ function connectWS(){
   ws.onmessage = (e) => {
     let entry; try { entry = JSON.parse(e.data); } catch(err) { return; }
     if (entry.keepalive) return;
-    allLogs.push(entry);
-    if (allLogs.length > 2000) allLogs = allLogs.slice(-2000);
+    if (!pushLog(entry)) return;   // 服务端重推的历史记录，已显示过
     if (matchesFilter(entry)) appendLogLine(entry);
   };
 }
@@ -730,7 +747,10 @@ function renderLogs(){
 async function loadInitialLogs(){
   try {
     const logs = await api('/api/logs?n=500');
-    allLogs = logs;
+    // 合并而不是覆盖：WebSocket 可能先一步把新记录推进来了，
+    // 直接赋值会把它们冲掉。pushLog 自带去重，重复的部分不会重复显示。
+    for (const entry of logs) pushLog(entry);
+    allLogs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     renderLogs();
   } catch(e) {}
 }
@@ -739,7 +759,7 @@ document.getElementById('log-search').addEventListener('input', () => {
   clearTimeout(debounceTimer); debounceTimer = setTimeout(renderLogs, 200);
 });
 document.getElementById('btn-clear-log').addEventListener('click', () => {
-  allLogs = []; renderLogs();
+  allLogs = []; logKeys.clear(); renderLogs();
 });
 
 /* ---------------- settings ---------------- */
@@ -748,6 +768,7 @@ async function loadSettings(){
   try {
     const s = await api('/api/settings');
     const rows = [
+      ['版本', s.version],
       ['主站地址', s.base_url],
       ['备用域名', (s.base_urls || []).slice(1).join('、') || '无'],
       ['媒体目录', s.media_root],

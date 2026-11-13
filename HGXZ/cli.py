@@ -19,6 +19,7 @@ from .download import download_hls, probe_media, validate_media
 from .cover import valid_cover, write_cover
 from .site import HuangguoClient
 from .state import StateDB
+from .version import build_label
 
 LOG = logging.getLogger('HGXZ')
 
@@ -359,6 +360,10 @@ def run_daemon(config: dict, schedule: str, web_port: int = 8099) -> int:
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
 
+    # 必须放在 handler 装好之后：这样横幅既能进日志文件，也能进 WebUI 的日志面板，
+    # 成为启动后的第一行，方便确认容器跑的是哪一次构建。
+    LOG.info('HGXZ %s', build_label())
+
     archiver = Archiver(config)
     archiver_ref = [archiver]
     set_shared_state(archiver.state, log_buf, archiver_ref)
@@ -429,6 +434,9 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
+    if not args.daemon:
+        # --daemon 由 run_daemon 在装好 handler 之后再打横幅，这里不重复打。
+        logging.getLogger('HGXZ').info('HGXZ %s', build_label())
     umask_val = os.environ.get('UMASK')
     if umask_val:
         try:

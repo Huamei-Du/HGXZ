@@ -316,6 +316,8 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 | 日志出现 `未安装 curl_cffi，退化为 urllib 传输层` | 容器/环境里缺 `curl_cffi`，只能挡请求头级检测。重装依赖：`pip install "curl_cffi>=0.7"` |
 | 某集一直失败 | 剧集可能已下架，失败会进入 24 小时冷却。可在 WebUI 点「重置失败」立即重试 |
 | 界面看不到封面 | 站点封面接口异常时会自动回退到 og:image；若两者都失败，日志中会有 `cover via ... failed` 记录 |
+| 重新构建后行为没变 | 先看日志第一行 `HGXZ <版本> (build <commit> @ <时间>)`，对照仓库最新提交的 SHA。对不上说明容器还在用本地缓存的旧镜像——Unraid 的 Apply 不会自动重新拉取 tag 未变的 `latest`，需要在终端 `docker pull ghcr.io/huamei-du/hgxz:latest` 后再 Apply，或删掉旧镜像重拉。WebUI「运行参数」页也会显示同样的版本串 |
+| 日志每行都显示两次 | 已修复：页面加载会先拉一次历史日志，WebSocket 连上后服务端又会重推最近 200 条。前端按「时间戳+级别+内容」去重，旧版本镜像仍会出现该现象 |
 
 ---
 

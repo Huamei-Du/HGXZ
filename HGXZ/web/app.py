@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..state import StateDB
+from ..version import build_label
 from .log_handler import LogBuffer
 
 LOG = logging.getLogger('HGXZ')
@@ -182,6 +183,7 @@ def create_app() -> FastAPI:
             return JSONResponse({'error': 'not ready'}, 503)
         archiver = _archiver_ref[0]
         return {
+            'version': build_label(),
             'base_url': archiver.client.base_url,
             'base_urls': archiver.client.base_urls,
             'media_root': str(archiver.root),
