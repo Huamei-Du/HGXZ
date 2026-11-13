@@ -14,6 +14,7 @@
     ],
     "request_interval": 2,
     "timeout": 30,
+    "category_check": "compat",
     "browser": {
       "profile": "chrome"
     },

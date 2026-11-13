@@ -10,6 +10,34 @@ import re
 
 ALBUM_DIR_RE = re.compile(r'^(.*?)\s*\[huangguo-(\d+)\]$')
 
+# 分类名里的分隔符/空白在站点不同页面上写法不一，比较前统一去掉。
+_CATEGORY_SEPARATORS = re.compile(r'[\s\u3000\-_·・/、|]+')
+
+
+def _is_subsequence(short: str, long: str) -> bool:
+    """short 的字符能否按顺序全部在 long 里找到（允许中间夹字）。"""
+    cursor = iter(long)
+    return all(char in cursor for char in short)
+
+
+def category_label_matches(detail: str, configured: str) -> bool:
+    """判断详情页的 ``data-history.cat`` 是否指向配置里的某个分类。
+
+    详情页的 ``cat`` 只是一个展示用的短标签，站点在不同页面会写出不同粒度
+    （配置里叫「AI成人短剧」，详情页只写「短剧」或「AI短剧」）。按字符串
+    全等比较会把这类专辑全部误判为“分类冲突”而跳过，所以放成两条规则：
+    包含关系，或删字缩写（短的字符按序都在长的里面）。「热点短剧」对
+    「AI成人短剧」两条都不满足，仍然算冲突，不会被误归。
+    """
+    a = _CATEGORY_SEPARATORS.sub('', (detail or '')).lower()
+    b = _CATEGORY_SEPARATORS.sub('', (configured or '')).lower()
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 2 and _is_subsequence(short, long)
+
 
 @dataclass
 class Album:

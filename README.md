@@ -267,6 +267,7 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 | `site.browser.profile` | 伪装用的浏览器指纹：`chrome` / `chrome142` / `chrome136` / `chrome131`（与站点过不去时可换一个试试） | `chrome` |
 | `site.browser.proxy` | 可选，单独给抓取会话指定代理（如 `http://192.168.1.2:7890`）；留空则沿用 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量 | 空 |
 | `site.categories` | 抓取的短剧分类与对应生成的 Emby 媒体库目录名 | — |
+| `site.category_check` | 详情页分类标签与配置比对的方式：`compat`（默认，包含/缩写都算同一分类，如「短剧」≈「AI成人短剧」）、`off`（完全信任列表页分类，永不判冲突） | `compat` |
 | `download.root` | 视频下载根目录（对应容器内 `/media`） | `/media` |
 | `download.retries` | 单集重试次数 | `3` |
 | `download.minimum_duration` | 视频最短有效时长（秒），过滤无效视频（建议 3 秒以兼容短花絮） | `3` |

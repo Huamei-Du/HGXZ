@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import argparse
@@ -12,9 +12,9 @@ import threading
 import time
 import re
 
-from .core import (Episode, build_episode_filename, parse_category_panel,
-                   parse_detail_html, sanitize_filename, write_episode_nfo,
-                   write_tvshow_nfo)
+from .core import (Episode, build_episode_filename, category_label_matches,
+                   parse_category_panel, parse_detail_html, sanitize_filename,
+                   write_episode_nfo, write_tvshow_nfo)
 from .download import download_hls, probe_media, validate_media
 from .cover import valid_cover, write_cover
 from .site import HuangguoClient
@@ -50,6 +50,10 @@ class Archiver:
         self.recheck_days = float(config['download'].get('recheck_days', 7))
         self.failure_cooldown_hours = float(config['download'].get('failure_cooldown_hours', 24))
         self.episode_timeout = float(config['download'].get('episode_timeout', 1800))
+        # 分类校验严格度：compat=按包含/缩写判定（默认），off=完全信任发现侧分类
+        self.category_check = str(site.get('category_check') or 'compat').lower()
+        # 详情页分类标签与配置不一致时只提示一次，避免每部剧刷一行日志
+        self._category_notes: set[str] = set()
 
     def close(self):
         self.client.close()
@@ -171,11 +175,22 @@ class Archiver:
         if cat_match:
             category = cat_match
         elif album.category != category['name']:
-            LOG.warning('skip album=%s expected=%s actual=%s',
-                        album.id, category['name'], album.category)
-            return {'album_id': album.id, 'skipped': True,
-                    'expected_category': category['name'],
-                    'actual_category': album.category}
+            if self.category_check == 'off' or category_label_matches(album.category, category['name']):
+                # 详情页只写了短标签（「短剧」对「AI成人短剧」），不是分类冲突：
+                # 以发现侧的分类为准归档，并把 album.category 归一成配置名，
+                # 免得状态库和 WebUI 里多出一个没人管的分类。
+                key = f"{category['name']}<-{album.category}"
+                if key not in self._category_notes:
+                    self._category_notes.add(key)
+                    LOG.info('分类标签归一: 详情页写作 %r，按 %r 归档（同类不再提示）',
+                             album.category, category['name'])
+                album = replace(album, category=category['name'])
+            else:
+                LOG.warning('skip album=%s expected=%s actual=%s',
+                            album.id, category['name'], album.category)
+                return {'album_id': album.id, 'skipped': True,
+                        'expected_category': category['name'],
+                        'actual_category': album.category}
         album_dir = self._album_dir(album, category)
         self.state.upsert_album(album.id, album.category, album.title,
                                 album.episode_count, album.ended,
