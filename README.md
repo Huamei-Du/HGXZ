@@ -54,6 +54,38 @@ print(d['http_version'], d['tls']['ja4'])"
 
 ---
 
+## 播放接口加密通道（本修改版新增）
+
+站点在 2026-11 前后给播放接口加了一层**加密通道**。表现很有迷惑性：旧接口
+`GET /api/videos/:id/play?ep=N` 仍然返回 **HTTP 200 + `status: 1`**，但 `data` 里
+的 `video_url`、`video_api`、`video_key`、`media_id` 全是空字符串。日志里就是：
+
+```
+album=12860 ep=1 permanent failure, skipping retries: empty video_url
+```
+
+看起来像“视频不存在”，其实是请求没走加密通道，服务端只回了空壳。
+
+现在 `HGXZ/edge.py` 按站点前端 `edge-api-crypto.js` 复刻了这套协议：
+
+| 环节 | 做法 |
+|------|------|
+| 通道端点 | `POST /api/playback/request`（另有 user / public / dynamic 三个 scope） |
+| 握手 | ECDH P-256，`{"v":1,"type":"hello","client_pub":...}` → `kid`/`sid`/`server_pub`/`salt` |
+| 派生 | `HKDF-SHA256(salt, "dx150-edge-v1\n{scope}\n{site}\n{kid}\n{sid}\nreq")` → AES-256-GCM，响应方向用 `res` |
+| 封装 | `{"v":1,"type":"call","kid","sid","seq","ts","ciphertext"}`，IV 后 4 字节为 seq，AAD 绑定 info/方向/seq/ts |
+| 真正的播放接口 | `POST /api/videos/:id/episodes/:ep/playback`，body 为 `{}`，返回 `streams.main` / `streams.hevc` |
+| 拉流鉴权 | 响应里的 `cdn.authKey`/`authValue`（`x-cdn-auth`）与 `cdn.app`（`x-cdn-app`），请求 m3u8/分片时要带上 |
+
+取到地址后仍然走原有的分片下载链路，AES-128 加密流照常解密。加密通道失败时会
+自动回退旧的明文接口；两边都失败时错误信息会把两条路径的原因都列出来，不再是
+一句没有上下文的 `empty video_url`。
+
+依赖上多了 `cryptography`（有 manylinux wheel，`python:3.13-slim` 直接装，无需编译）。
+缺这个包时加密通道整体停用，行为回到“只会回空壳”的旧接口。
+
+---
+
 ## 目录与路径规划
 
 | 用途 | 容器内路径 | Unraid 宿主机路径 | 说明 |
@@ -375,6 +407,8 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 
 | 现象 | 原因与处理 |
 |------|-----------|
+| `empty video_url` / `视频不存在`，一集都下不了 | 站点播放接口已收进加密通道。确认镜像是新构建的（启动日志第一行版本号），且镜像里装了 `cryptography`。若加密通道和旧接口都失败，错误信息会写成 `xxx（加密通道: yyy）`，按后半句判断 |
+| 日志出现 `curl_cffi` 但取址仍失败 | 与本改造无关，属站点侧风控或接口变更。把日志里 `加密通道: ...` 那段发出来 |
 | 容器**退出码 137** | 137 = 128 + 9，进程被 SIGKILL。多数是「停止容器时 10 秒内没退出被强杀」，也可能是内存不足。先看日志最后一行：出现 `收到 SIGTERM，退出` 属正常停止；没有任何信号日志且发生在下载中，就要查内存（`docker stats HGXZ`）或降低同时下载的规模 |
 | 容器**退出码 2** | 命令行参数错了。多半是 `command` 那行写了 `command: --daemon   # 说明` 这种行尾注释，被当成多余参数。改成 `command: ["--daemon"]` |
 | 日志提示「配置文件不存在」 | `/config` 挂载的宿主机目录里还没有 `config.json`。把 `config.example.json` 复制过去改名即可 |

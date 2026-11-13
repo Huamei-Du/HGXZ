@@ -2,3 +2,5 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 # 真实 Chrome TLS/HTTP2 指纹，用于绕过 CDN 的爬虫识别（见 HGXZ/browser.py）
 curl_cffi>=0.7
+# 站点播放接口走 edge 加密通道（ECDH + HKDF + AES-GCM，见 HGXZ/edge.py）
+cryptography>=42

@@ -258,10 +258,10 @@ class Archiver:
             succeeded = False
             for attempt in range(1, self.retries + 1):
                 try:
-                    url = self.client.play_url(album.id, number)
-                    info = download_hls(url, video, self.client.page_referer(album.id),
+                    source = self.client.play(album.id, number)
+                    info = download_hls(source.url, video, self.client.page_referer(album.id),
                                         self.minimum_duration, timeout=self.episode_timeout,
-                                        session=self.client.session)
+                                        session=self.client.session, headers=source.headers)
                     self.state.mark_episode(album.id, number, str(video), 'done',
                                             info.get('size', 0))
                     done += 1
@@ -273,9 +273,14 @@ class Archiver:
                 except Exception as exc:
                     last = exc
                     err_msg = str(exc).lower()
-                    is_permanent = any(k in err_msg for k in (
+                    # 网络层抖动（5xx / 超时 / 连接被重置）必须重试；
+                    # 只有“站点明确说这集没了”才算永久失败。
+                    transient = any(k in err_msg for k in (
+                        'http 5', '502', '503', '504', 'timeout', 'timed out',
+                        'connection', 'reset', 'eof', 'broken pipe'))
+                    is_permanent = (not transient) and any(k in err_msg for k in (
                         'empty video_url', 'play endpoint failed', 'not found', '404', '403',
-                        '不存在', '已下架', '下架'
+                        '不存在', '已下架', '下架', '加密通道未启用'
                     ))
                     LOG.warning('album=%s ep=%s attempt=%s failed=%s',
                                 album.id, number, attempt, exc)

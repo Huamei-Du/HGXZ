@@ -53,12 +53,17 @@ def validate_media(info: dict, minimum_duration: float = 3.0) -> bool:
 
 def _fetch(url: str, referer: str, timeout: float,
            session: BrowserSession | None = None,
-           kind: str = 'video') -> bytes:
+           kind: str = 'video',
+           headers: dict | None = None) -> bytes:
     # 所有请求都走浏览器伪装会话：真实 Chrome 的 TLS 指纹、HTTP/2、
     # 完整 sec-fetch-* 请求头，并复用站点的 Cookie。原实现只发了
     # "User-Agent: Mozilla/5.0"，这在 CDN 侧是最明显的爬虫特征。
+    #
+    # headers 用于 CDN 鉴权（x-cdn-auth / x-cdn-app）：站点把清单地址连同
+    # 一组鉴权头一起下发，拉 m3u8 与分片时都要带上。
     return (session or _default_session()).fetch(
-        url, referer=referer, kind=kind, timeout=timeout, pace=True)
+        url, referer=referer, kind=kind, headers=headers,
+        timeout=timeout, pace=True)
 
 
 def _attrs(line: str) -> dict:
@@ -106,11 +111,13 @@ def _parse_m3u8(text: str, playlist_url: str) -> dict:
 
 
 def _resolve_media_playlist(url: str, referer: str, timeout: float,
-                            session: BrowserSession | None = None) -> tuple[str, str]:
+                            session: BrowserSession | None = None,
+                            headers: dict | None = None) -> tuple[str, str]:
     """Follow master playlists (multiple variants) down to a media playlist."""
     playlist_url = url
     for _ in range(3):
-        text = _fetch(playlist_url, referer, timeout, session, 'playlist').decode('utf-8', errors='replace')
+        text = _fetch(playlist_url, referer, timeout, session, 'playlist',
+                      headers).decode('utf-8', errors='replace')
         if '#EXT-X-STREAM-INF' not in text:
             return playlist_url, text
         lines = text.splitlines()
@@ -151,7 +158,8 @@ def _decrypt_segment(data: bytes, key: bytes, iv: bytes) -> bytes:
 
 def download_hls(url: str, destination: Path, referer: str, minimum_duration: float = 3.0,
                  timeout: float | None = 1800.0,
-                 session: BrowserSession | None = None) -> dict:
+                 session: BrowserSession | None = None,
+                 headers: dict | None = None) -> dict:
     # Fetch every HLS segment as its own short-lived request with retries
     # instead of one long ffmpeg stream: the CDN resets long connections
     # mid-transfer, but a few megabytes per request survive that fine.
@@ -162,7 +170,7 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
     fetch_timeout = 30.0
     try:
         playlist_url, playlist_text = _resolve_media_playlist(
-            url, referer, fetch_timeout, session)
+            url, referer, fetch_timeout, session, headers)
         parsed = _parse_m3u8(playlist_text, playlist_url)
         segments = parsed['segments']
         if not segments:
@@ -181,7 +189,7 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
                     key_uri = segment['key_uri']
                     if key_uri and key_uri not in keys:
                         keys[key_uri] = _fetch(key_uri, segment_referer, fetch_timeout,
-                                               session, 'api')
+                                               session, 'api', headers)
                     data = None
                     last_error: Exception | None = None
                     for attempt in range(1, _SEGMENT_ATTEMPTS + 1):
@@ -191,7 +199,7 @@ def download_hls(url: str, destination: Path, referer: str, minimum_duration: fl
                         try:
                             data = _fetch(segment['url'], segment_referer,
                                           fetch_timeout if remaining is None else min(fetch_timeout, remaining),
-                                          session)
+                                          session, headers=headers)
                             if key_uri:
                                 data = _decrypt_segment(data, keys[key_uri], segment['iv'])
                             break
