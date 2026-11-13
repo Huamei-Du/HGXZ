@@ -772,7 +772,7 @@ async function loadSettings(){
       ['主站地址', s.base_url],
       ['备用域名', (s.base_urls || []).slice(1).join('、') || '无'],
       ['媒体目录', s.media_root],
-      ['分类', (s.categories || []).join('、')],
+      ['分类', (s.categories || []).map(c => (c && c.name ? c.name + ' → ' + (c.path || '') : String(c))).join('、')],
       ['单集重试次数', s.retries],
       ['最短有效时长', s.minimum_duration + ' 秒'],
       ['完结复查间隔', s.recheck_days + ' 天'],

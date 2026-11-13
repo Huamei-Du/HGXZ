@@ -65,33 +65,57 @@ class Archiver:
         seen: set[int] = set()
         out: list[tuple[int, dict]] = []
         for category in self.config['site']['categories']:
-            page = 1
-            category_ids: list[int] = []
-            known_total: int | None = None
-            while page <= self.MAX_CATEGORY_PAGES:
-                path = category['path'] if page == 1 else category['path'].rstrip('/') + f'/{page}/'
-                html = self.client.get_text(path)
-                ids, page_total = parse_category_panel(html)
-                if page_total is not None:
-                    known_total = page_total
-                fresh = [i for i in ids if i not in category_ids]
-                category_ids.extend(fresh)
-                if not fresh:
-                    # Last page reached, or the site ignored our page number
-                    # and re-served the same content; stop either way.
-                    break
-                if known_total is not None and len(category_ids) >= known_total:
-                    break
-                page += 1
-            else:
-                LOG.warning('category=%s hit the %d-page cap, results may be incomplete',
-                            category['name'], self.MAX_CATEGORY_PAGES)
-            LOG.info('category=%s discovered=%d', category['name'], len(category_ids))
+            try:
+                category_ids = self._discover_category(category)
+            except Exception as error:
+                # 单个分类挂掉（path 写错、站点改版、临时 5xx）不该把整轮同步
+                # 带走：先记清楚是哪个分类、哪个地址，再继续跑下一个。
+                LOG.error('category=%s failed (path=%s): %s; skipped, continuing',
+                          category.get('name'), category.get('path'), error)
+                continue
+            LOG.info('category=%s discovered=%d', category.get('name'), len(category_ids))
             for album_id in category_ids:
                 if album_id not in seen:
                     seen.add(album_id)
                     out.append((album_id, category))
         return out
+
+    def _discover_category(self, category: dict) -> list[int]:
+        """翻完一个分类的所有分页，返回专辑 ID（去重、保序）。"""
+        page = 1
+        category_ids: list[int] = []
+        known_total: int | None = None
+        while page <= self.MAX_CATEGORY_PAGES:
+            path = category['path'] if page == 1 else category['path'].rstrip('/') + f'/{page}/'
+            try:
+                html = self.client.get_text(path)
+            except Exception as error:
+                if page == 1:
+                    raise
+                # 站点最后一页常常直接 404，或者翻页时偶发 5xx：已经抓到的不该丢。
+                LOG.warning('category=%s page=%d failed, keeping %d albums: %s',
+                            category['name'], page, len(category_ids), error)
+                break
+            ids, page_total = parse_category_panel(html)
+            if page_total is not None:
+                known_total = page_total
+            fresh = [i for i in ids if i not in category_ids]
+            category_ids.extend(fresh)
+            if not fresh:
+                # Last page reached, or the site ignored our page number
+                # and re-served the same content; stop either way.
+                break
+            if known_total is not None and len(category_ids) >= known_total:
+                break
+            page += 1
+        else:
+            LOG.warning('category=%s hit the %d-page cap, results may be incomplete',
+                        category['name'], self.MAX_CATEGORY_PAGES)
+        if not category_ids:
+            # 页面能打开但解析不到任何专辑：通常是 path 指到了别处（列表页改版、
+            # 带上了页码、或者干脆是个空页）。静默返回 0 部会让问题更难发现。
+            raise RuntimeError(f'分类页没有任何专辑链接（{category["path"]}），请确认 path 正确')
+        return category_ids
 
     def _album_dir(self, album, category: dict) -> Path:
         library = sanitize_filename(category['library'])
@@ -407,6 +431,11 @@ def run_daemon(config: dict, schedule: str, web_port: int = 8099) -> int:
         archiver.client.session.warmup()
     except Exception as exc:  # 传输层起不来也要把原因说清楚，而不是静默
         LOG.warning('HTTP 传输层初始化失败: %s', exc)
+    # 把每个分类要抓的地址原样打出来：path 写错（比如多带了页码）是 404 的
+    # 头号原因，写在启动日志里就不用再翻 config.json 对照。
+    for category in config['site']['categories']:
+        LOG.info('分类: %s -> %s（媒体库 %s）', category.get('name'),
+                 category.get('path'), category.get('library', '-'))
     archiver_ref = [archiver]
     set_shared_state(archiver.state, log_buf, archiver_ref)
 

@@ -15,6 +15,22 @@ from .browser import BrowserSession
 LOG = logging.getLogger(__name__)
 
 
+def _status_of(error: Exception) -> int | None:
+    """取出异常里携带的 HTTP 状态码（curl_cffi 走 status，urllib 走 code）。"""
+    status = getattr(error, 'status', None) or getattr(error, 'code', None)
+    return int(status) if isinstance(status, int) else None
+
+
+def _missing_path(error: Exception) -> bool:
+    """404/410 这类“站点说没这个地址”的错误。
+
+    403/429 走 BlockedError（没有 status），仍然值得换域名换会话；而这几个
+    状态码在每个备用域名上都会一模一样，换域名只是白白等掉十几个请求间隔。
+    """
+    status = _status_of(error)
+    return status is not None and 400 <= status < 500
+
+
 @dataclass
 class PlaySource:
     """一次播放会话的清单地址与拉流所需请求头。"""
@@ -114,6 +130,12 @@ class HuangguoClient:
                     last_error = error
                     if is_absolute or index == len(candidates) - 1:
                         raise
+                    if _missing_path(error):
+                        # 地址本身不存在：备用域名会给出同样的 404，没必要逐个试。
+                        raise RuntimeError(
+                            f'{error}（备用域名同样会返回 {_status_of(error)}，'
+                            '常见原因是 site.categories[].path 写错，例如多带了页码）'
+                        ) from error
                     LOG.warning('site request failed via %s; trying backup: %s', candidate, error)
             raise last_error or RuntimeError('site request failed')
         finally:

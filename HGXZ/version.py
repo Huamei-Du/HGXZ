@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 _RAW_COMMIT = (os.environ.get('HGXZ_BUILD_COMMIT') or '').strip()
 _RAW_TIME = (os.environ.get('HGXZ_BUILD_TIME') or '').strip()
@@ -27,5 +27,5 @@ BUILD_TIME = _RAW_TIME or 'unknown'
 
 
 def build_label() -> str:
-    """形如 ``1.1.0 (build 4bd6d95 @ 2026-11-13T02:12:00Z)``。"""
+    """形如 ``1.1.1 (build 4bd6d95 @ 2026-11-13T02:12:00Z)``。"""
     return f'{__version__} (build {BUILD_COMMIT} @ {BUILD_TIME})'

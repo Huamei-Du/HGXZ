@@ -415,7 +415,8 @@ docker exec HGXZ python -m HGXZ.cli --config /config/config.json --scan-existing
 | 启动日志没有 `HTTP 传输层` 一行 | `curl_cffi` 没装进镜像，TLS 指纹仍是 Python 的。需要重新 `docker pull`（依赖层变了，只重启容器不生效） |
 | 启动日志的 `出站代理` 和自己想的不一样 | 该行会说明代理来自 `config.json` 还是环境变量。若显示「直连」而你以为配了，检查变量名是否为 `HTTP_PROXY`/`HTTPS_PROXY`，以及是否写在了 compose 的 `environment` 里 |
 | 容器启动后立即退出并报 JSON 解析错误 | `config.json` 内容不合法或为空文件。检查文件是否为合法 JSON |
-| 日志出现 `SSL: WRONG_VERSION_NUMBER` 或 `HTTP 404` | DNS 污染。确认 `HTTP_PROXY`/`HTTPS_PROXY` 已设置为局域网代理，且 `NO_PROXY` **不要**包含 `huangguoai.com` |
+| 日志出现 `SSL: WRONG_VERSION_NUMBER`，或**所有**地址都返回 `HTTP 404` | DNS 污染。确认 `HTTP_PROXY`/`HTTPS_PROXY` 已设置为局域网代理，且 `NO_PROXY` **不要**包含 `huangguoai.com` |
+| 只有分类页 404（如 `.../ai-duanju/40/`），报错里带「site.categories[].path 写错」 | 分类路径写成了某一页的地址。`site.categories[].path` 只写到分类根（`/ai-duanju/`），页码由程序自己翻；带页码访问就是 404，且 12 个备用域名会给出同样的 404，所以现在遇到 4xx 会直接停下并指名道姓，不再挨个试域名 |
 | 日志出现 `HTTP 403 Forbidden` | 站点风控。程序现在会伪装真实 Chrome 指纹并在被拦后重建会话重试；若仍持续，可尝试换 `site.browser.profile`（如 `chrome136`）、调大 `site.request_interval`，或经代理出网 |
 | 日志出现 `BlockedError` / `请求被拦` | 同上，说明 CDN 识别到了异常流量。连续出现时先确认出网 IP 是否被站点拉黑 |
 | 日志出现 `未安装 curl_cffi，退化为 urllib 传输层` | 容器/环境里缺 `curl_cffi`，只能挡请求头级检测。重装依赖：`pip install "curl_cffi>=0.7"` |

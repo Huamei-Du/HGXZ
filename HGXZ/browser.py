@@ -111,6 +111,19 @@ class BlockedError(RuntimeError):
     """被 WAF/CDN 拦下（403/429），值得换会话重试。"""
 
 
+class HttpStatusError(RuntimeError):
+    """站点正常回了一个错误状态（4xx/5xx）。
+
+    带上 ``status`` 是为了让上层能区分“这个地址不存在”和“这条路走不通”：
+    前者换备用域名毫无意义（每个域名都会给出同样的 404），后者才值得切换。
+    """
+
+    def __init__(self, status: int, url: str):
+        super().__init__(f'HTTP {status} for {_short(url)}')
+        self.status = status
+        self.url = url
+
+
 def _site_of(url: str) -> str:
     parts = urlsplit(url)
     return f'{parts.scheme}://{parts.netloc}'
@@ -368,7 +381,7 @@ class BrowserSession:
                 raise BlockedError(
                     f'HTTP {status} ({"forbidden" if status == 403 else "rate limited"})')
             if status >= 400:
-                raise RuntimeError(f'HTTP {status} for {_short(url)}')
+                raise HttpStatusError(status, url)
             return response.content
 
         request = Request(url, method=method, data=data, headers=headers)

@@ -187,7 +187,8 @@ def create_app() -> FastAPI:
             'base_url': archiver.client.base_url,
             'base_urls': archiver.client.base_urls,
             'media_root': str(archiver.root),
-            'categories': [c['name'] for c in archiver.config['site']['categories']],
+            'categories': [{'name': c.get('name', ''), 'path': c.get('path', '')}
+                           for c in archiver.config['site']['categories']],
             'retries': archiver.retries,
             'minimum_duration': archiver.minimum_duration,
             'recheck_days': archiver.recheck_days,
